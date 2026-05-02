@@ -1,0 +1,6 @@
+__pycache__
+*.pyc
+.git
+.gitattributes
+*.md
+temp_*.jpg

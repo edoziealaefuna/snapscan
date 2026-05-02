@@ -1,2 +1,7 @@
-venv
-.vercel
+__pycache__/
+*.pyc
+.env
+temp_*.jpg
+*.log
+.DS_Store
+venv/

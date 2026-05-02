@@ -133,6 +133,7 @@
           ↺ reset
         </button>
       </div>
+
       <!-- ── Footer ─────────────────────────────── -->
       <footer>
         <div class="footer-main">
@@ -154,8 +155,10 @@
       let storedImage = null;
       let isProcessing = false;
       let cameraReady = false;
+      let retryCount = 0;
+      const MAX_RETRIES = 3;
 
-      // ── DOM refs ──────────────────────────────────
+      // DOM refs
       const video = document.getElementById("video");
       const overlay = document.getElementById("overlay");
       const ctx = overlay.getContext("2d");
@@ -178,46 +181,60 @@
       const waveCanvas = document.getElementById("wave-bg");
       const wCtx = waveCanvas.getContext("2d");
 
-      // ── Messages ──────────────────────────────────
+      // Messages
       const MSG = {
-        ready: "📷 Camera ready - take a scan",
-        scan: "🔒 Scan locked in",
-        compare: "🔍 Analysis running . . . please stand by",
-        reset: "🗑️ Scan profile cleared",
+        ready: "📷 Camera ready - position your face in the frame",
+        scan: "🔒 Reference face captured",
+        compare: "🔍 Analyzing facial features...",
+        reset: "🗑️ Profile cleared",
         denied:
-          "🚫 Camera access was blocked. Please allow permissions and reload.",
-        match: "✅ Scan confirmed - face match",
-        nomatch: "❌ Scan confirmed - face mismatch",
-        network: "🔌 Connection waves lost. Ensure flask server is running.",
+          "🚫 Camera access blocked. Please allow permissions and reload.",
+        match: "✅ Identity verified - face match confirmed",
+        nomatch: "❌ Identity rejected - face mismatch",
+        network: "🔌 Connection error. Is the Flask server running?",
+        noface: "😕 No face detected. Please look directly at the camera",
+        blurry: "📸 Image too blurry. Please hold still",
+        timeout: "⏱️ Request timed out. Please try again",
       };
 
-      // ── Quirky lines ──────────────────────────────
+      // Quirky lines
       const QUIRKY_MATCH = [
         "Are you twins? The algorithm is shook 👀",
         "Suspiciously similar... we're watching you 👁️",
         "Same face energy detected 🌊",
+        "Identity confirmed! You are who you say you are 🎯",
       ];
+
       const QUIRKY_NEAR = [
-        "Are you twins? Because this is too close to call 👀",
         "Distant cousins? The cheekbones don't lie 🧬",
-        "Almost identical — fate had other plans 🌊",
+        "Almost identical — but not quite there yet 🎯",
+        "So close! Just a few micro-features off 🌊",
       ];
+
       const QUIRKY_MISMATCH = [
-        "Completely unique faces — you're a 1 in 7 billion combo 🌊",
+        "Completely unique — you're a 1 in 7 billion combo 🌊",
         "No two faces alike — science just proved it ✨",
         "Different in all the right ways 🐚",
+        "These faces tell completely different stories 📖",
+      ];
+
+      const QUIRKY_ERROR = [
+        "🌊 Signal lost in the ocean... please try again",
+        "🔍 Face not found in the scan zone",
+        "📸 Let's try that again with better lighting",
+        "🤔 The algorithm is confused. Please reposition",
       ];
 
       function getRandom(arr) {
         return arr[Math.floor(Math.random() * arr.length)];
       }
 
-      // ── Clock ─────────────────────────────────────
+      // Clock
       setInterval(() => {
         systemTime.textContent = new Date().toTimeString().split(" ")[0];
       }, 1000);
 
-      // ── Wave background ───────────────────────────
+      // Wave background
       let waveOffset = 0;
 
       function resizeWave() {
@@ -283,22 +300,31 @@
       resizeWave();
       drawWaves();
 
-      // ── Status helpers ────────────────────────────
-      function setStatus(icon, msg, wavy = false) {
+      // Status helpers
+      function setStatus(icon, msg, isError = false) {
+        statusPanel.classList.remove("animate", "alarm");
+        void statusPanel.offsetWidth;
+        statusPanel.classList.add("animate");
+
+        if (isError) {
+          statusPanel.classList.add("alarm");
+        }
+
+        statusIcon.textContent = icon;
+        statusText.textContent = msg;
+        statusText.classList.remove("wavy");
+      }
+
+      function setWavyStatus(icon, msg) {
         statusPanel.classList.remove("animate", "alarm");
         void statusPanel.offsetWidth;
         statusPanel.classList.add("animate");
         statusIcon.textContent = icon;
-        if (wavy) {
-          const words = msg.split(" ");
-          statusText.innerHTML = words
-            .map((w) => `<span>${w}&nbsp;</span>`)
-            .join("");
-          statusText.classList.add("wavy");
-        } else {
-          statusText.textContent = msg;
-          statusText.classList.remove("wavy");
-        }
+        const words = msg.split(" ");
+        statusText.innerHTML = words
+          .map((w) => `<span>${w}&nbsp;</span>`)
+          .join("");
+        statusText.classList.add("wavy");
       }
 
       function setAlarm(icon, msg) {
@@ -310,9 +336,18 @@
         statusText.classList.remove("wavy");
       }
 
-      // ── Camera ────────────────────────────────────
+      function showError(message, details = "") {
+        setStatus("⚠️", message, true);
+        subtitleRes.textContent = "⚠️ ERROR";
+        subtitleRes.className = "subtitle-result mismatch";
+        quirkyLine.textContent = details || getRandom(QUIRKY_ERROR);
+        quirkyLine.classList.add("visible");
+        radarWrap.classList.remove("visible");
+      }
+
+      // Camera
       async function startCamera() {
-        setStatus("⏳", "Initialising system...");
+        setStatus("⏳", "Initialising ocean scanner...");
         try {
           const stream = await navigator.mediaDevices.getUserMedia({
             video: {
@@ -330,19 +365,62 @@
             cameraReady = true;
             scanBtn.disabled = false;
             setStatus("📷", MSG.ready);
+
+            // Start brightness checker
+            startBrightnessCheck();
           });
         } catch (err) {
           camOffline.innerHTML = `<span class="cam-icon">🚫</span><span>${MSG.denied}</span>`;
-          setStatus("🚫", MSG.denied);
+          setStatus("🚫", MSG.denied, true);
         }
       }
 
+      // Brightness checker
+      let brightnessInterval;
+
+      function startBrightnessCheck() {
+        brightnessInterval = setInterval(() => {
+          if (video.videoWidth > 0 && !isProcessing) {
+            const canvas = document.createElement("canvas");
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const vctx = canvas.getContext("2d");
+            vctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const imageData = vctx.getImageData(
+              0,
+              0,
+              canvas.width,
+              canvas.height,
+            );
+            const data = imageData.data;
+            let sum = 0;
+            for (let i = 0; i < data.length; i += 4) {
+              sum += (data[i] + data[i + 1] + data[i + 2]) / 3;
+            }
+            const avgBrightness = sum / (data.length / 4);
+
+            if (avgBrightness < 80 && cameraReady) {
+              setStatus(
+                "💡",
+                "Low light detected. Move to a brighter area for better accuracy",
+              );
+            } else if (avgBrightness > 200) {
+              setStatus("☀️", "Too bright! Adjust lighting for best results");
+            }
+          }
+        }, 3000);
+      }
+
       window.addEventListener("beforeunload", () => {
-        if (video.srcObject)
+        if (video.srcObject) {
           video.srcObject.getTracks().forEach((t) => t.stop());
+        }
+        if (brightnessInterval) {
+          clearInterval(brightnessInterval);
+        }
       });
 
-      // ── Capture frame ─────────────────────────────
+      // Capture frame with higher quality
       function captureFrame() {
         const w = video.videoWidth,
           h = video.videoHeight;
@@ -353,10 +431,10 @@
         c.translate(w, 0);
         c.scale(-1, 1);
         c.drawImage(video, 0, 0, w, h);
-        return cap.toDataURL("image/jpeg", 0.85);
+        return cap.toDataURL("image/jpeg", 0.95); // Higher quality
       }
 
-      // ── Draw scan frame ───────────────────────────
+      // Draw scan frame
       function drawScanFrame() {
         const w = overlay.width,
           h = overlay.height;
@@ -390,13 +468,13 @@
         ctx.clearRect(0, 0, overlay.width, overlay.height);
       }
 
-      // ── Show result ───────────────────────────────
+      // Show result
       function showResult(data) {
         const isMatch = data.match;
         const pct = Math.max(0, Math.min(100, (1 - data.distance) * 100));
         const isNear = !isMatch && pct >= 40;
 
-        subtitleRes.textContent = isMatch ? "✅ MATCH" : "❌ MISMATCH";
+        subtitleRes.textContent = isMatch ? "✅ VERIFIED" : "❌ REJECTED";
         subtitleRes.className =
           "subtitle-result " + (isMatch ? "match" : "mismatch");
 
@@ -414,7 +492,7 @@
         distWrap.classList.add("visible");
         distBar.style.width = pct + "%";
         distBar.className = "distance-bar-fill" + (isMatch ? " match" : "");
-        distVal.textContent = `${pct.toFixed(1)}% similar`;
+        distVal.textContent = `${pct.toFixed(1)}% match confidence`;
 
         if (data.quality) {
           qualityRow.classList.add("visible");
@@ -428,14 +506,17 @@
             data.quality.comp_size;
         }
 
-        // Hide buttons, show result
         document.getElementById("btn-group").classList.add("hidden");
         document.getElementById("result-wrap").classList.remove("hidden");
       }
 
-      // ── Buttons ───────────────────────────────────
+      // Buttons
       scanBtn.addEventListener("click", () => {
-        if (!cameraReady || isProcessing) return;
+        if (!cameraReady || isProcessing) {
+          setStatus("⏳", "Camera not ready yet...", true);
+          return;
+        }
+
         storedImage = captureFrame();
         scanBtn.classList.add("pulsing");
         setTimeout(() => scanBtn.classList.remove("pulsing"), 800);
@@ -449,43 +530,104 @@
         subtitleRes.className = "subtitle-result";
         distWrap.classList.remove("visible");
         qualityRow.classList.remove("visible");
+
+        // Success feedback
+        setTimeout(() => {
+          setStatus(
+            "✅",
+            "Reference face saved! Click Compare to verify",
+            false,
+          );
+        }, 1500);
       });
 
       compareBtn.addEventListener("click", async () => {
-        if (!cameraReady || isProcessing || !storedImage) return;
+        if (!cameraReady || isProcessing) {
+          showError(
+            "System busy",
+            "Please wait for current operation to complete",
+          );
+          return;
+        }
+
+        if (!storedImage) {
+          showError(
+            "No reference face",
+            "Please capture a reference face first using the Scan button",
+          );
+          return;
+        }
+
         isProcessing = true;
         setButtonsDisabled(true);
         radarWrap.classList.add("visible");
-        setStatus("🔍", MSG.compare, true);
+        setWavyStatus("🔍", "Analyzing facial features and comparing...");
+
         const currentImage = captureFrame();
+
         try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 30000);
+
           const response = await fetch(API_ENDPOINT, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ image1: storedImage, image2: currentImage }),
+            signal: controller.signal,
           });
+
+          clearTimeout(timeoutId);
           const data = await response.json();
           radarWrap.classList.remove("visible");
+
           if (!response.ok) {
-            setStatus("⚠️", `Error: ${data.error || "Unknown error."}`);
-            subtitleRes.textContent = "⚠️ ERROR";
-            subtitleRes.className = "subtitle-result mismatch";
+            // Handle specific error types
+            if (data.error && data.error.toLowerCase().includes("blur")) {
+              showError(
+                MSG.blurry,
+                "Hold your camera steady and ensure good lighting",
+              );
+            } else if (
+              data.error &&
+              data.error.toLowerCase().includes("face")
+            ) {
+              showError(
+                MSG.noface,
+                "Position your face in the center of the frame",
+              );
+            } else {
+              showError(
+                data.error || "Verification failed",
+                "Please try again with better positioning",
+              );
+            }
           } else {
             showResult(data);
           }
         } catch (err) {
           radarWrap.classList.remove("visible");
-          setStatus("🔌", MSG.network);
+          if (err.name === "AbortError") {
+            showError(
+              MSG.timeout,
+              "The verification took too long. Please try again",
+            );
+          } else {
+            showError(
+              MSG.network,
+              "Make sure the Flask server is running on port 7860",
+            );
+          }
+        } finally {
+          isProcessing = false;
+          setButtonsDisabled(false);
+          clearOverlay();
         }
-        isProcessing = false;
-        setButtonsDisabled(false);
-        clearOverlay();
       });
 
       resetBtn.addEventListener("click", () => {
         storedImage = null;
         scanBadge.classList.remove("visible");
-        compareBtn.disabled = false;
+        compareBtn.disabled = true;
         subtitleRes.textContent = "—";
         subtitleRes.className = "subtitle-result";
         quirkyLine.classList.remove("visible");
@@ -495,9 +637,12 @@
         clearOverlay();
         setAlarm("🗑️", MSG.reset);
 
-        // Show buttons, hide result
         document.getElementById("btn-group").classList.remove("hidden");
         document.getElementById("result-wrap").classList.add("hidden");
+
+        setTimeout(() => {
+          setStatus("📷", "Profile cleared. Ready for new scan", false);
+        }, 1000);
       });
 
       function setButtonsDisabled(d) {
@@ -506,15 +651,28 @@
         resetBtn.disabled = d || !storedImage;
       }
 
-      // ── Keyboard shortcuts ────────────────────────
+      // Keyboard shortcuts
       document.addEventListener("keydown", (e) => {
-        if (e.key === "s" || e.key === "S") scanBtn.click();
-        if (e.key === "c" || e.key === "C") compareBtn.click();
-        if (e.key === "r" || e.key === "R") resetBtn.click();
+        if (e.key === "s" || e.key === "S") {
+          e.preventDefault();
+          if (!scanBtn.disabled) scanBtn.click();
+        }
+        if (e.key === "c" || e.key === "C") {
+          e.preventDefault();
+          if (!compareBtn.disabled) compareBtn.click();
+        }
+        if (e.key === "r" || e.key === "R") {
+          e.preventDefault();
+          if (!resetBtn.disabled) resetBtn.click();
+        }
       });
 
-      // ── Start ─────────────────────────────────────
+      // Start everything
       startCamera();
+
+      // Console log for debugging
+      console.log("SnapScan initialized - API endpoint:", API_ENDPOINT);
+      console.log("Test API with: curl http://127.0.0.1:7860/health");
     </script>
   </body>
 </html>
